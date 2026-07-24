@@ -1,14 +1,14 @@
-# Fedora Sandbox Hardening Configuration
+# Oracle VM VirtualBox 7.2.14 Sandbox Architecture Configuration
 
-This document outlines the exhaustive technical configuration for establishing a cryptographically sealed, deeply isolated sandbox environment using Oracle VM VirtualBox 7.2.14 for a Fedora Linux 44 guest.
+This document outlines the technical configuration for establishing an isolated sandbox environment using Oracle VM VirtualBox 7.2.14 for a Windows 11 guest. The configuration balances system stability and visual fluidity for recording purposes, enforces strict execution constraints, manages cryptographic states, and limits networking surfaces.
 
-## 1. Network Confinement and VirtIO Offloading
-Confines the guest to an internal VLAN, drops promiscuous traffic, and utilizes the paravirtualized `virtio` driver to bypass legacy hardware emulation vulnerabilities.
+## 1. Internal Network Assignment and VirtIO Offloading
+The command links the primary adapter to an isolated switch in host memory, preventing external traffic routing. Using a paravirtualized driver bypasses legacy emulation vulnerabilities, creating an efficient memory channel. Disabling secondary interfaces blocks alternative escape routes. The engine explicitly marks nullified interfaces as disabled.
 
 **Implementation Command:**
 ```bash
-VBoxManage modifyvm "VM-NAME-HERE" --nic1 intnet --intnet1 "sandbox-net" --nictype1 virtio --nic-promisc1 deny
-VBoxManage modifyvm "VM-NAME-HERE" --nic2 none --nic3 none --nic4 none --nic5 none --nic6 none --nic7 none --nic8 none
+VBoxManage modifyvm "VM-NAME-HERE" --nic1=intnet --intnet1="sandbox-net" --nic-type1=virtio --nic-promisc1=deny
+VBoxManage modifyvm "VM-NAME-HERE" --nic2=none --nic3=none --nic4=none --nic5=none --nic6=none --nic7=none --nic8=none
 ```
 
 **Diagnostic Command:**
@@ -18,278 +18,298 @@ VBoxManage showvminfo "VM-NAME-HERE" | grep -i "NIC 1"
 
 **Optimal Output:**
 ```text
-NIC 1: MAC: 080027XXXXXX, Attachment: Internal Network 'sandbox-net', Cable connected: on, Trace: off (file: none), Type: virtio, Reported speed: 0 Mbps, Boot priority: 0, Promisc Policy: deny, Bandwidth group: none
+NIC 1:                       MAC: 080027XXXXXX, Attachment: Internal Network 'sandbox-net', Cable connected: on, Trace: off (file: none), Type: virtio, Reported speed: 0 Mbps, Boot priority: 0, Promisc Policy: deny, Bandwidth group: LimitGroup
 ```
 
-## 2. Microarchitectural CPU Isolation
-Mitigates side-channel attacks (L1TF, MDS, Spectre) by disabling nested paging, forcing shadow page tables, flushing the L1 data cache and MDS buffers on VM entry, and enforcing absolute branch predictor barriers (IBPB).
+## 2. Network Bandwidth Throttling
+The configuration creates a transmission limit group capped at ten megabytes per second and binds it to the primary network adapter. The token-bucket system silently drops outbound packets that exceed this threshold. The limit remains transparent to the guest, preventing the execution of lateral network floods without alerting the payload.
 
 **Implementation Command:**
 ```bash
-VBoxManage modifyvm "VM-NAME-HERE" --nested-paging off --large-pages off --page-fusion off
-VBoxManage modifyvm "VM-NAME-HERE" --spec-ctrl on --l1d-flush-on-vm-entry on --mds-clear-on-vm-entry on --ibpb-on-vm-entry on --ibpb-on-vm-exit on
+VBoxManage bandwidthctl "VM-NAME-HERE" add "LimitGroup" --type network --limit 10M 2>/dev/null || true
+VBoxManage modifyvm "VM-NAME-HERE" --nic-bandwidth-group1="LimitGroup"
 ```
 
 **Diagnostic Command:**
 ```bash
-VBoxManage showvminfo "VM-NAME-HERE" | grep -E -i "(Nested Paging|Large Pages|Page Fusion|L1D|MDS|Speculation|IBPB)"
+VBoxManage bandwidthctl "VM-NAME-HERE" list
 ```
 
 **Optimal Output:**
 ```text
-Nested Paging:   off
-Large Pages:     off
-Page Fusion:     off
-L1D Flush on VM entry: on
-MDS Clear on VM entry: on
-Speculation Control: on
-IBPB on VM entry: on
-IBPB on VM exit: on
+Name: 'LimitGroup', Type: network, Limit: 10 MBytes/sec
 ```
 
-## 3. Execution Throttling and CPU Constraints
-Restricts the guest to a single core and caps execution at 50% capacity to prevent host-level resource exhaustion and scheduler-based Denial of Service (DoS) attacks.
+## 3. Network Boot Deactivation
+The configuration restricts the boot sequence strictly to the attached local disk. Setting remaining devices to a null state removes network boot protocols from the initialization phase. The diagnostic output specifically identifies these disconnected slots as not assigned. This prevents firmware from parsing malicious network configuration packets.
 
 **Implementation Command:**
 ```bash
-VBoxManage modifyvm "VM-NAME-HERE" --cpus 1 --cpu-execution-cap 50
+VBoxManage modifyvm "VM-NAME-HERE" --boot1=disk --boot2=none --boot3=none --boot4=none
 ```
 
 **Diagnostic Command:**
 ```bash
-VBoxManage showvminfo "VM-NAME-HERE" | grep -i "CPU exec cap"
+VBoxManage showvminfo "VM-NAME-HERE" | grep -i "Boot Device"
 ```
 
 **Optimal Output:**
 ```text
-CPU exec cap:    50%
+Boot Device 1:               HardDisk
+Boot Device 2:               Not Assigned
+Boot Device 3:               Not Assigned
+Boot Device 4:               Not Assigned
 ```
 
-## 4. Hardware Perimeter Deactivation (USB, Audio, UART, LPT)
-Removes superfluous peripheral controllers to shrink the host-side execution attack surface. Explicitly disables modern and legacy USB emulators and audio bridging.
+## 4. Hardware-Assisted Paging and TLB Optimization
+Activating nested paging allows the physical processor to manage memory translation directly, while large pages reduce translation overhead. The architecture-specific parameter enables virtual processor identifiers to tag cache entries, preventing severe latency during context switches. Page fusion is explicitly disabled to prevent memory deduplication side-channel vulnerabilities.
 
 **Implementation Command:**
 ```bash
-VBoxManage modifyvm "VM-NAME-HERE" --usb-xhci off --usb-ehci off --usb-ohci off
-VBoxManage modifyvm "VM-NAME-HERE" --audio-enabled off
-VBoxManage modifyvm "VM-NAME-HERE" --uart1 off --lpt1 off
+VBoxManage modifyvm "VM-NAME-HERE" --nested-paging=on --large-pages=on --page-fusion=off
+VBoxManage modifyvm "VM-NAME-HERE" --x86-vtx-vpid=on
 ```
 
 **Diagnostic Command:**
 ```bash
-VBoxManage showvminfo "VM-NAME-HERE" | grep -E -i "(USB|Audio|UART|LPT)"
+VBoxManage showvminfo "VM-NAME-HERE" | grep -E -i "(Nested Paging|Large Pages|Page Fusion|VPID)"
 ```
 
 **Optimal Output:**
 ```text
-USB xHCI:        off
-USB EHCI:        off
-USB OHCI:        off
-Audio:           disabled
-UART 1:          disabled
-LPT 1:           disabled
+Nested Paging:               enabled
+Large Pages:                 enabled
+VT-x VPID:                   enabled
+Page Fusion:                 disabled
 ```
 
-## 5. Interaction Protocol Severance
-Disables host-to-guest data bridging, blocking the Extended Data Control Protocols leveraged by modern Wayland compositors in Fedora 44.
+## 5. Microarchitectural Buffer Optimization
+The command forces the hypervisor to scrub processor caches and execute indirect branch predictor barriers during context switches. Activating these hardware defenses isolates the host processor. The mitigations prevent malicious code from exploiting speculative execution vulnerabilities to read privileged memory pages belonging to the underlying Linux host.
 
 **Implementation Command:**
 ```bash
-VBoxManage modifyvm "VM-NAME-HERE" --clipboard-mode disabled --clipboard-file-transfers off --drag-and-drop disabled
+VBoxManage modifyvm "VM-NAME-HERE" --spec-ctrl=on --l1d-flush-on-vm-entry=on --mds-clear-on-vm-entry=on --ibpb-on-vm-entry=on --ibpb-on-vm-exit=on
 ```
 
 **Diagnostic Command:**
 ```bash
-VBoxManage showvminfo "VM-NAME-HERE" | grep -E "(Clipboard|Drag'n'drop)"
+VBoxManage showvminfo "VM-NAME-HERE" --machinereadable | grep -E "(spec-ctrl|l1d-flush|mds-clear|ibpb)"
 ```
 
 **Optimal Output:**
 ```text
-Clipboard Mode:  disabled
-Drag'n'drop Mode: disabled
+ibpb-on-vm-exit="on"
+ibpb-on-vm-entry="on"
+spec-ctrl="on"
+l1d-flush-on-vm-entry="on"
+mds-clear-on-vm-entry="on"
 ```
 
-## 6. Time Stamp Counter (TSC) Virtualization
-Prevents the guest from utilizing high-resolution timers to execute cache-timing attacks by severing wall-clock synchronization and tying the TSC exclusively to virtual execution cycles.
+## 6. Time Desynchronization and Epoch Spoofing
+The command ties the virtual time stamp counter directly to the physical execution pipeline, stopping the counter when the engine pauses. A negative offset rewinds the chronological epoch by thirty days. This synthetic chronometry subverts malicious payloads relying on time-bomb logic or latency measurements to detect the analysis platform.
 
 **Implementation Command:**
 ```bash
+VBoxManage modifyvm "VM-NAME-HERE" --hpet=on
 VBoxManage setextradata "VM-NAME-HERE" "VBoxInternal/Devices/VMMDev/0/Config/GetHostTimeDisabled" 1
 VBoxManage setextradata "VM-NAME-HERE" "VBoxInternal/TM/TSCTiedToExecution" 1
-```
-
-**Diagnostic Command:**
-```bash
-VBoxManage getextradata "VM-NAME-HERE" enumerate | grep -E "(GetHostTimeDisabled|TSCTiedToExecution)"
-```
-
-**Optimal Output:**
-```text
-Key: VBoxInternal/Devices/VMMDev/0/Config/GetHostTimeDisabled, Value: 1
-Key: VBoxInternal/TM/TSCTiedToExecution, Value: 1
-```
-
-## 7. Firmware Integrity and UEFI Secure Boot
-Enforces a 64-bit EFI boot structure and cryptographically locks the NVRAM. Introduces the Oracle Platform Key to enforce a strict Secure Boot chain.
-
-**Implementation Command:**
-```bash
-VBoxManage modifyvm "VM-NAME-HERE" --firmware efi64
-VBoxManage modifynvram "VM-NAME-HERE" inituefivarstore
-VBoxManage modifynvram "VM-NAME-HERE" enrollmssignatures
-VBoxManage modifynvram "VM-NAME-HERE" enrollorclpk
-VBoxManage modifynvram "VM-NAME-HERE" secureboot --enable
-```
-
-**Diagnostic Command:**
-```bash
-VBoxManage showvminfo "VM-NAME-HERE" | grep -i "Firmware"
-VBoxManage showvminfo "VM-NAME-HERE" | grep -i "Secure Boot"
-```
-
-**Optimal Output:**
-```text
-Firmware:        EFI (64-bit)
-Secure Boot:     enabled
-```
-
-## 8. Paravirtualization Interface Spoofing
-Hides the standard KVM hypercall endpoints from the Fedora 44 kernel, forcing strict architectural emulation and blinding the guest to the hypervisor.
-
-**Implementation Command:**
-```bash
-VBoxManage modifyvm "VM-NAME-HERE" --paravirt-provider none
-```
-
-**Diagnostic Command:**
-```bash
-VBoxManage showvminfo "VM-NAME-HERE" | grep -i "Paravirt"
-```
-
-**Optimal Output:**
-```text
-Paravirt. Provider: none
-```
-
-## 9. Immutable Disk State with Auto-Reset
-Forces the primary storage medium into an immutable state and deterministically discards the differential Copy-on-Write layer upon every cold boot.
-
-**Implementation Command:**
-*(Note: Replace 'Fedora.vdi' with the exact UUID or absolute file path to the virtual disk image)*
-```bash
-VBoxManage modifymedium "Fedora.vdi" --type immutable --autoreset on
-```
-
-**Diagnostic Command:**
-```bash
-VBoxManage showmediuminfo "Fedora.vdi" | grep -E -i "(Type|Auto-Reset)"
-```
-
-**Optimal Output:**
-```text
-Type:            immutable
-Auto-Reset:      on
-```
-
-## 10. Headless Execution Enforcement
-Executes the engine without a graphical user interface, removing the host-side window management and display server attack surface.
-
-**Implementation Command:**
-```bash
-VBoxManage modifyvm "VM-NAME-HERE" --default-frontend headless
-```
-
-**Diagnostic Command:**
-```bash
-VBoxManage showvminfo "VM-NAME-HERE" | grep -i "Default Frontend"
-```
-
-**Optimal Output:**
-```text
-Default Frontend: headless
-```
-
-## 11. Graphics Controller and Acceleration Restrictions
-Aligns with Linux kernel 7.0+ requirements by enforcing the VMSVGA controller while strictly disabling 3D hardware translation.
-
-**Implementation Command:**
-```bash
-VBoxManage modifyvm "VM-NAME-HERE" --graphicscontroller vmsvga --accelerate3d off --vram 16
-```
-
-**Diagnostic Command:**
-```bash
-VBoxManage showvminfo "VM-NAME-HERE" | grep -E -i "(Graphics Controller|3D Acceleration|VRAM size)"
-```
-
-**Optimal Output:**
-```text
-Graphics Controller: VMSVGA
-3D Acceleration: disabled
-VRAM size:       16MB
-```
-
-## 12. TPM Emulation Severance
-Explicitly drops the software Trusted Platform Module (SWTPM) endpoint, eliminating the cryptographic state machine from the guest's accessible ACPI tables.
-
-**Implementation Command:**
-```bash
-VBoxManage modifyvm "VM-NAME-HERE" --tpm-type none
-```
-
-**Diagnostic Command:**
-```bash
-VBoxManage showvminfo "VM-NAME-HERE" | grep -i "TPM Type"
-```
-
-**Optimal Output:**
-```text
-TPM Type:        none
-```
-
-## 13. High Precision Event Timer (HPET) Deactivation
-Disables the microsecond-accurate HPET system timer, significantly degrading the guest's ability to coordinate microarchitectural cache-timing exploits.
-
-**Implementation Command:**
-```bash
-VBoxManage modifyvm "VM-NAME-HERE" --hpet off
+VBoxManage modifyvm "VM-NAME-HERE" --bios-system-time-offset=-2592000000
 ```
 
 **Diagnostic Command:**
 ```bash
 VBoxManage showvminfo "VM-NAME-HERE" | grep -i "HPET"
+VBoxManage getextradata "VM-NAME-HERE" enumerate | grep -E "(GetHostTimeDisabled|TSCTiedToExecution)"
 ```
 
 **Optimal Output:**
 ```text
-HPET:            off
+HPET:                        enabled
+Key: VBoxInternal/Devices/VMMDev/0/Config/GetHostTimeDisabled, Value: 1
+Key: VBoxInternal/TM/TSCTiedToExecution, Value: 1
 ```
 
-## 14. Teleportation and Remote State Interfaces
-Nullifies the live-migration Teleporter module and the Remote Desktop Protocol (VRDE) service to seal remote memory injection and network display bridging vectors.
+## 7. Execution Architecture and Core Allocation
+The command assigns four virtual processing cores to the engine and permits them to utilize their full capacity. Providing sufficient processing power prevents the guest scheduler from dropping threads under heavy analysis loads. The configuration mimics standard consumer hardware to deceive sandbox-evasion routines embedded within malicious payloads.
 
 **Implementation Command:**
 ```bash
-VBoxManage modifyvm "VM-NAME-HERE" --teleporter off --vrde off
+VBoxManage modifyvm "VM-NAME-HERE" --cpus=4 --cpu-execution-cap=100
 ```
 
 **Diagnostic Command:**
 ```bash
-VBoxManage showvminfo "VM-NAME-HERE" | grep -E -i "(Teleporter|VRDE)"
+VBoxManage showvminfo "VM-NAME-HERE" | grep -E -i "(Number of CPUs|CPU exec cap)"
 ```
 
 **Optimal Output:**
 ```text
-VRDE:            disabled
-Teleporter Enabled: disabled
+Number of CPUs:              4
+CPU exec cap:                100%
 ```
 
-## 15. Nested Hardware Virtualization Constraints
-Explicitly blocks VT-x/AMD-V instruction passthrough, stopping the guest from manipulating the host's Virtual Machine Control Structures (VMCS) to orchestrate hypervisor escapes.
+## 8. Legacy Hardware and USB Disconnection
+The command utilizes updated parameters to detach physical universal serial bus protocols entirely. It also removes legacy communication ports and eliminates the emulated audio backend. Disabling these interfaces removes thousands of lines of emulation code, permanently blinding exploit vectors that target virtualized descriptor parsing and hardware translation.
 
 **Implementation Command:**
 ```bash
-VBoxManage modifyvm "VM-NAME-HERE" --nested-hw-virt off
+VBoxManage modifyvm "VM-NAME-HERE" --mouse=usbtablet
+VBoxManage modifyvm "VM-NAME-HERE" --usb=off --usbehci=off --usbxhci=off
+VBoxManage modifyvm "VM-NAME-HERE" --audio=none
+VBoxManage modifyvm "VM-NAME-HERE" --uart1=off --lpt1=off
+```
+
+**Diagnostic Command:**
+```bash
+VBoxManage showvminfo "VM-NAME-HERE" | grep -E -i "(Pointing Device|USB|EHCI|XHCI|Audio|UART|LPT)"
+```
+
+**Optimal Output:**
+```text
+Pointing Device:             USB Tablet
+USB:                         disabled
+EHCI:                        disabled
+XHCI:                        disabled
+Audio:                       disabled (Driver: Unknown, Controller: Unknown, Codec: Unknown)
+UART 1:                      disabled
+LPT 1:                       disabled
+```
+
+## 9. IOMMU and Hardware Translation Lockdown
+The command explicitly disables the emulated hardware translation layer. Because the architecture relies on paravirtualized network drivers instead of passing physical hardware directly into the virtual machine, this translation layer is unnecessary. Keeping it turned off removes complex software from the execution path, eliminating the risk of out-of-bounds memory vulnerabilities. The engine capitalizes the null state for hardware translation.
+
+**Implementation Command:**
+```bash
+VBoxManage modifyvm "VM-NAME-HERE" --iommu=none
+```
+
+**Diagnostic Command:**
+```bash
+VBoxManage showvminfo "VM-NAME-HERE" | grep -i "IOMMU"
+```
+
+**Optimal Output:**
+```text
+IOMMU:                       None
+```
+
+## 10. Graphics Controller and Hardware Acceleration
+The command configures a standard graphics controller but strictly disables three-dimensional hardware acceleration using the consolidated parameter. Legacy two-dimensional acceleration parameters are removed. Relying exclusively on software rendering guarantees that malformed graphical shaders cannot bypass boundaries to exploit vulnerabilities within the physical graphics drivers of the host.
+
+**Implementation Command:**
+```bash
+VBoxManage modifyvm "VM-NAME-HERE" --graphicscontroller=vboxsvga --accelerate3d=off --vram=128
+VBoxManage modifyvm "VM-NAME-HERE" --default-frontend=gui
+```
+
+**Diagnostic Command:**
+```bash
+VBoxManage showvminfo "VM-NAME-HERE" | grep -E -i "(Graphics Controller|VRAM size|Acceleration|Default Frontend)"
+```
+
+**Optimal Output:**
+```text
+Graphics Controller:         VBoxSVGA
+VRAM size:                   128MB
+3D Acceleration:             disabled
+2D Video Acceleration:       disabled
+Default Frontend:            gui
+```
+
+## 11. Interaction Processes and Telemetry Disconnection
+The command terminates all communication channels by disabling the shared clipboard and file transfers. It shuts down diagnostic recording and memory tracing systems. Closing data sockets prevents malicious software from interacting with the host clipboard or exploiting memory-mapped tracing buffers. The diagnostic output relies on specific phrasing, appending the word mode to the clipboard attributes.
+
+**Implementation Command:**
+```bash
+VBoxManage modifyvm "VM-NAME-HERE" --clipboard-mode=disabled --clipboard-file-transfers=off --drag-and-drop=disabled
+VBoxManage modifyvm "VM-NAME-HERE" --recording=off --tracing-enabled=off
+```
+
+**Diagnostic Command:**
+```bash
+VBoxManage showvminfo "VM-NAME-HERE" | grep -E -i "(Clipboard Mode|Drag'n'drop Mode|Recording|Tracing)"
+```
+
+**Optimal Output:**
+```text
+Clipboard Mode:              disabled
+Drag'n'drop Mode:            disabled
+Recording:                   disabled
+Tracing Enabled:             disabled
+```
+
+## 12. Firmware Integrity and UEFI Secure Boot
+The command initializes a firmware interface and dynamically injects platform keys and signature databases into the virtual motherboard. Enabling secure boot forces the firmware to cryptographically verify the digital signature of the operating system bootloader against the injected certificates, preventing low-level bootkit malware from modifying the initialization sequence.
+
+**Implementation Command:**
+```bash
+VBoxManage modifyvm "VM-NAME-HERE" --firmware=efi64
+VBoxManage modifynvram "VM-NAME-HERE" inituefivarstore
+VBoxManage modifynvram "VM-NAME-HERE" enrollorclpk
+VBoxManage modifynvram "VM-NAME-HERE" enrollmssignatures
+VBoxManage modifynvram "VM-NAME-HERE" secureboot --enable
+VBoxManage modifyvm "VM-NAME-HERE" --bios-boot-menu=disabled --bios-logo-display-time=0
+```
+
+**Diagnostic Command:**
+```bash
+VBoxManage showvminfo "VM-NAME-HERE" | grep -E -i "(Firmware|Secure Boot)"
+```
+
+**Optimal Output:**
+```text
+Firmware:                    EFI64
+Secure Boot:                 enabled
+```
+
+## 13. TPM Provisioning and Paravirtualization Stabilization
+The command generates a software-based trusted platform module within the memory space of the hypervisor, completely severing the guest from the physical cryptographic hardware. Setting the virtualization provider to match standards instructs the kernel on proper interrupt routing, ensuring the system remains stable and responsive without crashing during heavy loads.
+
+**Implementation Command:**
+```bash
+VBoxManage modifyvm "VM-NAME-HERE" --tpm-type=2.0
+VBoxManage modifyvm "VM-NAME-HERE" --paravirt-provider=hyperv
+```
+
+**Diagnostic Command:**
+```bash
+VBoxManage showvminfo "VM-NAME-HERE" | grep -E -i "(TPM|Paravirt)"
+```
+
+**Optimal Output:**
+```text
+TPM Type:                    2.0
+Paravirt. Provider:          Hyper-V
+Effective Paravirt. Prov.:   Hyper-V
+```
+
+## 14. Teleportation, VRDE, and Memory Ballooning
+The command uses proper syntax to disable remote display endpoints and lock the dynamic memory allocation engine. Disabling the remote server closes interaction vectors, while condensing the memory balloon parameter into a single string prevents syntax rejection. This ensures malicious programs cannot manipulate memory size to exhaust physical RAM.
+
+**Implementation Command:**
+```bash
+VBoxManage modifyvm "VM-NAME-HERE" --teleporter=off --vrde=off
+VBoxManage modifyvm "VM-NAME-HERE" --guestmemoryballoon=0
+```
+
+**Diagnostic Command:**
+```bash
+VBoxManage showvminfo "VM-NAME-HERE" | grep -E -i "(Teleporter|VRDE|balloon)"
+```
+
+**Optimal Output:**
+```text
+VRDE:                        disabled
+Teleporter Enabled:          disabled
+Guest memory balloon size:   0 Megabytes
+```
+
+## 15. Nested Hardware Virtualization Constraints
+The command blocks the guest operating system from accessing underlying processor virtualization instructions. This restriction stops malicious software from attempting to build internal hypervisors inside the sandbox. Preventing the guest from manipulating control structures ensures the primary containment layer remains intact, so the target operating system cannot hide its internal activities.
+
+**Implementation Command:**
+```bash
+VBoxManage modifyvm "VM-NAME-HERE" --nested-hw-virt=off
 ```
 
 **Diagnostic Command:**
@@ -299,23 +319,62 @@ VBoxManage showvminfo "VM-NAME-HERE" | grep -i "Nested VT-x/AMD-V"
 
 **Optimal Output:**
 ```text
-Nested VT-x/AMD-V: disabled
+Nested VT-x/AMD-V:           disabled
 ```
 
-## 16. Dynamic Memory Alteration (Ballooning)
-Hard-caps the `virtio-balloon` driver, preventing a compromised guest kernel from inducing Out-Of-Memory (OOM) conditions or exploiting shared memory allocations on the host.
+## 16. PCIe NVMe Storage, Host I/O Caching, and Disk Attachment
+The command adds a modern storage controller and attaches the virtual disk media. Disabling the host cache forces disk reads and writes to bypass the host kernel entirely via direct memory access. This severs the link between guest disk activity and host memory, significantly reducing the impact of storage-based exploits.
 
 **Implementation Command:**
 ```bash
-VBoxManage modifyvm "VM-NAME-HERE" --guestmemoryballoon 0
+VBoxManage storagectl "VM-NAME-HERE" --name "NVMe-Controller" --add=pcie --controller=NVMe --portcount=1 --hostiocache=off
+VBoxManage storageattach "VM-NAME-HERE" --storagectl "NVMe-Controller" --port 0 --device 0 --type hdd --medium "Windows.vdi"
 ```
 
 **Diagnostic Command:**
 ```bash
-VBoxManage showvminfo "VM-NAME-HERE" | grep -i "Guest memory balloon"
+VBoxManage showvminfo "VM-NAME-HERE" | grep -i "Host I/O Cache"
 ```
 
 **Optimal Output:**
 ```text
-Guest memory balloon: 0MB
+Host I/O Cache:              off
+```
+
+## 17. Shared Folder Removal
+The command systematically attempts to delete permanent or temporary shared folders that might exist between the host and the virtual machine. It runs silently, ignoring errors if no folders are found. Removing shared directories is a mandatory security step that destroys direct file-system bridges, preventing malicious software from escaping the engine.
+
+**Implementation Command:**
+```bash
+VBoxManage sharedfolder remove "VM-NAME-HERE" --name "host_share" 2>/dev/null || true
+VBoxManage sharedfolder remove "VM-NAME-HERE" --name "host_share" --transient 2>/dev/null || true
+```
+
+**Diagnostic Command:**
+```bash
+VBoxManage showvminfo "VM-NAME-HERE" | grep -i "Shared folders" -A 2
+```
+
+**Optimal Output:**
+```text
+Shared folders:              <none>
+```
+
+## 18. Immutable Disk State with Auto-Reset
+The command locks the primary virtual disk into a read-only state, generating a differencing disk overlay within a temporary file. Every registry modification or dropped executable is captured exclusively within this transient overlay. Upon shutdown, the engine destroys the overlay completely, returning the environment to a pristine baseline.
+
+**Implementation Command:**
+```bash
+VBoxManage modifymedium "Windows.vdi" --type immutable --autoreset=on
+```
+
+**Diagnostic Command:**
+```bash
+VBoxManage showmediuminfo "Windows.vdi" | grep -E -i "(Type|Auto-Reset)"
+```
+
+**Optimal Output:**
+```text
+Type:                        immutable
+Auto-Reset:                  on
 ```
